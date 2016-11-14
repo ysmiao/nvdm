@@ -1,4 +1,4 @@
-"""NVDM Tensorflow implementation --Yishu Miao"""
+"""NVDM Tensorflow implementation by Yishu Miao"""
 from __future__ import print_function
 
 import numpy as np
@@ -12,26 +12,27 @@ tf.set_random_seed(0)
 
 flags = tf.app.flags
 flags.DEFINE_string('data_dir', 'data/20news', 'Data dir path.')
-flags.DEFINE_float('learning_rate', 1e-5, 'Learning rate.')
+flags.DEFINE_float('learning_rate', 5e-5, 'Learning rate.')
 flags.DEFINE_integer('batch_size', 64, 'Batch size.')
 flags.DEFINE_integer('n_hidden', 500, 'Size of each hidden layer.')
 flags.DEFINE_integer('n_topic', 50, 'Size of stochastic vector.')
 flags.DEFINE_integer('n_sample', 1, 'Number of samples.')
 flags.DEFINE_integer('vocab_size', 2000, 'Vocabulary size.')
 flags.DEFINE_boolean('test', False, 'Process test data.')
+flags.DEFINE_string('non_linearity', 'tanh', 'Non-linearity of the MLP.')
 FLAGS = flags.FLAGS
 
 class NVDM(object):
     """ Neural Variational Document Model -- BOW VAE.
     """
     def __init__(self, 
-                 vocab_size=2000,
-                 n_hidden=500,
-                 n_topic=50, 
-                 n_sample=1,
-                 learning_rate=1e-5, 
-                 batch_size=64,
-                 non_linearity=tf.nn.tanh):
+                 vocab_size,
+                 n_hidden,
+                 n_topic, 
+                 n_sample,
+                 learning_rate, 
+                 batch_size,
+                 non_linearity):
         self.vocab_size = vocab_size
         self.n_hidden = n_hidden
         self.n_topic = n_topic
@@ -45,12 +46,12 @@ class NVDM(object):
 
         # encoder
         with tf.variable_scope('encoder'): 
-          self.enc_vec = utils.mlp(self.x, [self.n_hidden, self.n_hidden])
+          self.enc_vec = utils.mlp(self.x, [self.n_hidden], self.non_linearity)
           self.mean = utils.linear(self.enc_vec, self.n_topic, scope='mean')
           self.logsigm = utils.linear(self.enc_vec, 
                                      self.n_topic, 
                                      bias_start_zero=True,
-                                     matrix_start_zero=False,
+                                     matrix_start_zero=True,
                                      scope='logsigm')
           self.kld = -0.5 * tf.reduce_sum(1 - tf.square(self.mean) + 2 * self.logsigm - tf.exp(2 * self.logsigm), 1)
           self.kld = self.mask*self.kld  # mask paddings
@@ -95,14 +96,11 @@ def train(sess, model,
           training_epochs=1000, 
           alternate_epochs=10):
   """train nvdm model."""
-  data_set, data_count = utils.data_set(train_url)
+  train_set, train_count = utils.data_set(train_url)
   test_set, test_count = utils.data_set(test_url)
   # hold-out development dataset
-  divide = int(0.9*len(data_set))
-  train_set = data_set[:divide]
-  train_count = data_count[:divide]
-  dev_set = data_set[divide:]
-  dev_count = data_count[divide:]
+  dev_set = test_set[:50]
+  dev_count = test_count[:50]
 
   dev_batches = utils.create_batches(len(dev_set), batch_size, shuffle=False)
   test_batches = utils.create_batches(len(test_set), batch_size, shuffle=False)
@@ -120,8 +118,10 @@ def train(sess, model,
         print_mode = 'updating encoder'
       for i in xrange(alternate_epochs):
         loss_sum = 0.0
+        ppx_sum = 0.0
         kld_sum = 0.0
         word_count = 0
+        doc_count = 0
         for idx_batch in train_batches:
           data_batch, count_batch, mask = utils.fetch_data(
           train_set, train_count, idx_batch, FLAGS.vocab_size)
@@ -130,19 +130,28 @@ def train(sess, model,
                                     [model.objective, model.kld]),
                                     input_feed)
           loss_sum += np.sum(loss)
-          kld_sum += np.sum(kld)/np.sum(mask)  
+          kld_sum += np.sum(kld) / np.sum(mask) 
           word_count += np.sum(count_batch)
+          # to avoid nan error
+          count_batch = np.add(count_batch, 1e-12)
+          # per document loss
+          ppx_sum += np.sum(np.divide(loss, count_batch)) 
+          doc_count += np.sum(mask)
         print_ppx = np.exp(loss_sum / word_count)
+        print_ppx_perdoc = np.exp(ppx_sum / doc_count)
         print_kld = kld_sum/len(train_batches)
         print('| Epoch train: {:d} |'.format(epoch+1), 
                print_mode, '{:d}'.format(i),
-               '| Perplexity: {:.5f}'.format(print_ppx),
+               '| Corpus ppx: {:.5f}'.format(print_ppx),  # perplexity for all docs
+               '| Per doc ppx: {:.5f}'.format(print_ppx_perdoc),  # perplexity for per doc
                '| KLD: {:.5}'.format(print_kld))
     #-------------------------------
     # dev
     loss_sum = 0.0
     kld_sum = 0.0
+    ppx_sum = 0.0
     word_count = 0
+    doc_count = 0
     for idx_batch in dev_batches:
       data_batch, count_batch, mask = utils.fetch_data(
           dev_set, dev_count, idx_batch, FLAGS.vocab_size)
@@ -150,19 +159,26 @@ def train(sess, model,
       loss, kld = sess.run([model.objective, model.kld],
                            input_feed)
       loss_sum += np.sum(loss)
-      kld_sum += np.sum(kld)/np.sum(mask)  
+      kld_sum += np.sum(kld) / np.sum(mask)  
       word_count += np.sum(count_batch)
+      count_batch = np.add(count_batch, 1e-12)
+      ppx_sum += np.sum(np.divide(loss, count_batch))
+      doc_count += np.sum(mask) 
     print_ppx = np.exp(loss_sum / word_count)
+    print_ppx_perdoc = np.exp(ppx_sum / doc_count)
     print_kld = kld_sum/len(dev_batches)
     print('| Epoch dev: {:d} |'.format(epoch+1), 
            '| Perplexity: {:.9f}'.format(print_ppx),
+           '| Per doc ppx: {:.5f}'.format(print_ppx_perdoc),
            '| KLD: {:.5}'.format(print_kld))        
     #-------------------------------
     # test
     if FLAGS.test:
       loss_sum = 0.0
       kld_sum = 0.0
+      ppx_sum = 0.0
       word_count = 0
+      doc_count = 0
       for idx_batch in test_batches:
         data_batch, count_batch, mask = utils.fetch_data(
           test_set, test_count, idx_batch, FLAGS.vocab_size)
@@ -172,20 +188,32 @@ def train(sess, model,
         loss_sum += np.sum(loss)
         kld_sum += np.sum(kld)/np.sum(mask) 
         word_count += np.sum(count_batch)
+        count_batch = np.add(count_batch, 1e-12)
+        ppx_sum += np.sum(np.divide(loss, count_batch))
+        doc_count += np.sum(mask) 
       print_ppx = np.exp(loss_sum / word_count)
+      print_ppx_perdoc = np.exp(ppx_sum / doc_count)
       print_kld = kld_sum/len(test_batches)
       print('| Epoch test: {:d} |'.format(epoch+1), 
              '| Perplexity: {:.9f}'.format(print_ppx),
+             '| Per doc ppx: {:.5f}'.format(print_ppx_perdoc),
              '| KLD: {:.5}'.format(print_kld))   
 
 def main(argv=None):
+    if FLAGS.non_linearity == 'tanh':
+      non_linearity = tf.nn.tanh
+    elif FLAGS.non_linearity == 'sigmoid':
+      non_linearity = tf.nn.sigmoid
+    else:
+      non_linearity = tf.nn.relu
+
     nvdm = NVDM(vocab_size=FLAGS.vocab_size,
                 n_hidden=FLAGS.n_hidden,
                 n_topic=FLAGS.n_topic, 
                 n_sample=FLAGS.n_sample,
                 learning_rate=FLAGS.learning_rate, 
                 batch_size=FLAGS.batch_size,
-                non_linearity=tf.nn.relu)
+                non_linearity=non_linearity)
     sess = tf.Session()
     init = tf.initialize_all_variables()
     sess.run(init)

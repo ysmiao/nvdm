@@ -55,6 +55,8 @@ def fetch_data(data, count, idx_batch, vocab_size):
         data_batch[i, word_id] = freq
       count_batch.append(count[doc_id])
       mask[i]=1.0
+    else:
+      count_batch.append(0)
   return data_batch, count_batch, mask
 
 def variable_parser(var_list, prefix):
